@@ -1,29 +1,30 @@
 name: Build TinyGPTNeoX Model
-description: Builds an untrained TinyGPTNeoX model from tokenizer vocab and hyperparams, then saves initial weights + JSON config + model code.
+description: Builds an untrained TinyGPTNeoX model from tokenizer vocab and hyperparams, then saves initial weights, JSON config, and model code.
+
 inputs:
-  - name: tokenizer_json
-    type: Model
-  - name: num_layers
-    type: Integer
-    default: 4
+  - {name: tokenizer_json, type: Data}
+  - {name: num_layers, type: Integer, default: 4}
+
 outputs:
-  - name: model_weights
-    type: Model
-  - name: model_config
-    type: Data
-  - name: model_py
-    type: Data
+  - {name: model_weights, type: Model}
+  - {name: model_config, type: Data}
+  - {name: model_py, type: Data}
+
 implementation:
   container:
     image: python:3.9
     command:
+      - sh
+      - -c
+      - |
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet torch tokenizers || \
+        PIP_DISABLE_PIP_VERSION_CHECK=1 python3 -m pip install --quiet torch tokenizers --user
+        exec python3 -u - "$@" 
       - python3
       - -u
       - -c
       - |
-        import subprocess, sys, os, json, argparse, importlib.util
-        subprocess.run([sys.executable, "-m", "pip", "install", "--quiet", "--no-cache-dir", "torch", "tokenizers"], check=True)
-        import torch
+        import os, json, argparse, importlib.util, torch
         from tokenizers import Tokenizer
 
         MODEL_PY = r"""
@@ -189,16 +190,23 @@ implementation:
                 return logits, new_kvs
         """
 
+        def write_output(path, value, mode="w"):
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, mode, encoding="utf-8") as f:
+                if isinstance(value, (dict, list)):
+                    json.dump(value, f, indent=2)
+                else:
+                    f.write(str(value))
+
         def main():
             ap = argparse.ArgumentParser()
-            ap.add_argument("--tokenizer-json", required=True)
-            ap.add_argument("--num-layers", type=int, required=True)
-            ap.add_argument("--model-weights", required=True)
-            ap.add_argument("--model-config", required=True)
-            ap.add_argument("--model-py", required=True)
+            ap.add_argument("--tokenizer_json", required=True)
+            ap.add_argument("--num_layers", type=int, required=True)
+            ap.add_argument("--model_weights", required=True)
+            ap.add_argument("--model_config", required=True)
+            ap.add_argument("--model_py", required=True)
             args = ap.parse_args()
 
-            # vocab size from tokenizer json
             tok = Tokenizer.from_file(args.tokenizer_json)
             vocab_size = tok.get_vocab_size()
 
@@ -217,16 +225,11 @@ implementation:
                 "dtype": "float16" if model_dtype == torch.float16 else "float32",
             }
 
-            os.makedirs(os.path.dirname(args.model_config) or ".", exist_ok=True)
-            with open(args.model_config, "w", encoding="utf-8") as f:
-                json.dump(CONFIG, f, indent=2)
-            print(f"[INFO] Model config saved to {args.model_config}")
+            # Save config + model code
+            write_output(args.model_config, CONFIG)
+            write_output(args.model_py, MODEL_PY)
 
-            os.makedirs(os.path.dirname(args.model_py) or ".", exist_ok=True)
-            with open(args.model_py, "w", encoding="utf-8") as f:
-                f.write(MODEL_PY)
-            print(f"[INFO] Model code saved to {args.model_py}")
-
+            # Dynamically import TinyGPTNeoX
             spec = importlib.util.spec_from_file_location("tinygpt_neox_model", args.model_py)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
@@ -234,26 +237,23 @@ implementation:
             model = mod.TinyGPTNeoX(CONFIG)
             if model_dtype == torch.float16:
                 model.half()
-            model.to(device)
-            model.eval()
+            model.to(device).eval()
 
-            os.makedirs(os.path.dirname(args.model_weights) or ".", exist_ok=True)
             torch.save(model.state_dict(), args.model_weights)
-            print(f"[INFO] Weights saved to {args.model_weights}")
 
             n_params = sum(p.numel() for p in model.parameters())
-            print(f"[INFO] TinyGPTNeoX init: layers={CONFIG['num_layers']} heads={CONFIG['num_heads']} emb_dim={CONFIG['emb_dim']} params={n_params}")
+            print(f"[INFO] TinyGPTNeoX init complete: layers={CONFIG['num_layers']} params={n_params}")
 
         if __name__ == "__main__":
             main()
     args:
-      - --tokenizer-json
+      - --tokenizer_json
       - {inputPath: tokenizer_json}
-      - --num-layers
+      - --num_layers
       - {inputValue: num_layers}
-      - --model-weights
+      - --model_weights
       - {outputPath: model_weights}
-      - --model-config
+      - --model_config
       - {outputPath: model_config}
-      - --model-py
+      - --model_py
       - {outputPath: model_py}
