@@ -26,16 +26,12 @@ implementation:
         import torch
         from tokenizers import Tokenizer
 
-        # This string becomes tinygpt_neox_model.py and is importable by the training brick.
-        MODEL_PY = '''
+        MODEL_PY = r"""
         import math
         import torch
         import torch.nn as nn
         import torch.nn.functional as F
 
-        # =====================
-        # Rotary Embeddings
-        # =====================
         def rotate_half(x: torch.Tensor) -> torch.Tensor:
             x1 = x[..., ::2]
             x2 = x[..., 1::2]
@@ -53,9 +49,6 @@ implementation:
             emb = torch.cat((freqs, freqs), dim=-1)  # [seq, rotary_dim]
             return emb.sin(), emb.cos()
 
-        # =====================
-        # Attention
-        # =====================
         class MaskedMultiHeadAttention(nn.Module):
             def __init__(self, emb_dim, num_heads, rotary_pct=0.25, dropout=0.0):
                 super().__init__()
@@ -80,7 +73,7 @@ implementation:
                 q, k, v = qkv[0], qkv[1], qkv[2]  # (B, H, T, D)
 
                 # Apply RoPE
-                if self.rotary_dim > 0:
+                if self.rotary_dim > 0 and sin is not None and cos is not None:
                     q_rot, q_pass = q[..., :self.rotary_dim], q[..., self.rotary_dim:]
                     k_rot, k_pass = k[..., :self.rotary_dim], k[..., self.rotary_dim:]
                     sin = sin.view(1, 1, T, self.rotary_dim)
@@ -112,9 +105,7 @@ implementation:
                 out = torch.matmul(attn_probs, v).transpose(1, 2).contiguous().view(B, T, E)
                 return self.out_proj(out), present_kv
 
-        # =====================
-        # Feedforward
-        # =====================
+
         class FeedForward(nn.Module):
             def __init__(self, emb_dim, ff_mult=4, dropout=0.0):
                 super().__init__()
@@ -125,10 +116,6 @@ implementation:
 
             def forward(self, x):
                 return self.dropout(self.fc2(self.act(self.fc1(x))))
-
-        # =====================
-        # Transformer Block
-        # =====================
         class NeoXBlock(nn.Module):
             def __init__(self, emb_dim, num_heads, rotary_pct=0.25, ff_mult=4, dropout=0.0):
                 super().__init__()
@@ -148,9 +135,6 @@ implementation:
                 x = x + ff_out
                 return x, present_kv
 
-        # =====================
-        # Tiny GPT-NeoX
-        # =====================
         class TinyGPTNeoX(nn.Module):
             def __init__(self, cfg):
                 super().__init__()
@@ -170,10 +154,8 @@ implementation:
                 self.final_ln = nn.LayerNorm(emb_dim)
                 self.head = nn.Linear(emb_dim, vocab_size, bias=False)
 
-                # Tie weights with embeddings (like GPT-NeoX)
                 self.head.weight = self.emb.weight
 
-                # Precompute sin/cos for max_seq_len
                 rotary_dim = self.blocks[0].attn.rotary_dim
                 if rotary_dim > 0:
                     sin, cos = make_rotary_sin_cos(self.pos_max, rotary_dim, device="cpu", dtype=torch.float32)
@@ -205,7 +187,7 @@ implementation:
                 x = self.final_ln(x)
                 logits = self.head(x)
                 return logits, new_kvs
-        '''
+        """
 
         def main():
             ap = argparse.ArgumentParser()
@@ -223,7 +205,6 @@ implementation:
             device = "cuda" if torch.cuda.is_available() else "cpu"
             model_dtype = torch.float16 if device == "cuda" else torch.float32
 
-            # Minimal, fixed hyperparams (override only num_layers from input)
             CONFIG = {
                 "vocab_size": vocab_size,
                 "emb_dim": 512,
@@ -236,19 +217,16 @@ implementation:
                 "dtype": "float16" if model_dtype == torch.float16 else "float32",
             }
 
-            # Save JSON config
             os.makedirs(os.path.dirname(args.model_config) or ".", exist_ok=True)
             with open(args.model_config, "w", encoding="utf-8") as f:
                 json.dump(CONFIG, f, indent=2)
             print(f"[INFO] Model config saved to {args.model_config}")
 
-            # Write the reusable model source file
             os.makedirs(os.path.dirname(args.model_py) or ".", exist_ok=True)
             with open(args.model_py, "w", encoding="utf-8") as f:
                 f.write(MODEL_PY)
             print(f"[INFO] Model code saved to {args.model_py}")
 
-            # Import the just-written module and build the model
             spec = importlib.util.spec_from_file_location("tinygpt_neox_model", args.model_py)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
@@ -259,12 +237,10 @@ implementation:
             model.to(device)
             model.eval()
 
-            # Save initial weights
             os.makedirs(os.path.dirname(args.model_weights) or ".", exist_ok=True)
             torch.save(model.state_dict(), args.model_weights)
             print(f"[INFO] Weights saved to {args.model_weights}")
 
-            # Tiny summary
             n_params = sum(p.numel() for p in model.parameters())
             print(f"[INFO] TinyGPTNeoX init: layers={CONFIG['num_layers']} heads={CONFIG['num_heads']} emb_dim={CONFIG['emb_dim']} params={n_params}")
 
